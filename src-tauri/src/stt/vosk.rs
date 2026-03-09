@@ -23,6 +23,7 @@ fn f32_to_i16_samples(samples: &[f32]) -> Vec<i16> {
 pub struct VoskStream {
     _model: Model,
     recognizer: Recognizer,
+    last_partial: String,
 }
 
 impl VoskStream {
@@ -37,13 +38,14 @@ impl VoskStream {
         let mut recognizer = Recognizer::new(&model, TARGET_SAMPLE_RATE)
             .ok_or_else(|| anyhow!("Failed to create Vosk recognizer"))?;
 
-        recognizer.set_max_alternatives(10);
+        recognizer.set_max_alternatives(0);
         recognizer.set_words(true);
         recognizer.set_partial_words(true);
 
         Ok(Self {
             _model: model,
             recognizer,
+            last_partial: String::new(),
         })
     }
 
@@ -58,9 +60,10 @@ impl VoskStream {
         match state {
             DecodingState::Running => {
                 let partial = self.recognizer.partial_result().partial.trim();
-                if partial.is_empty() {
+                if partial.is_empty() || partial == self.last_partial {
                     Ok(String::new())
                 } else {
+                    self.last_partial = partial.to_string();
                     Ok(partial.to_string())
                 }
             }
@@ -74,9 +77,25 @@ impl VoskStream {
                         .map(|alt| alt.text)
                         .unwrap_or(""),
                 };
-                Ok(text.trim().to_string())
+                let trimmed = text.trim().to_string();
+                self.last_partial.clear();
+                Ok(trimmed)
             }
             DecodingState::Failed => Err(anyhow!("Vosk decoding failed")),
         }
+    }
+
+    pub fn finalize(&mut self) -> Result<String> {
+        let result = self.recognizer.final_result();
+        let text = match result {
+            CompleteResult::Single(single) => single.text,
+            CompleteResult::Multiple(multiple) => multiple
+                .alternatives
+                .first()
+                .map(|alt| alt.text)
+                .unwrap_or(""),
+        };
+        self.last_partial.clear();
+        Ok(text.trim().to_string())
     }
 }

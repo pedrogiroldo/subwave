@@ -1,10 +1,28 @@
-use rubato::{Async, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use rubato::{Async, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use std::sync::mpsc;
+use audioadapter_buffers::direct::InterleavedSlice;
 
 const TARGET_SAMPLE_RATE: u32 = 16000;
-const CHUNK_SECONDS: usize = 4;
-const TARGET_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * CHUNK_SECONDS;
+const CHUNK_MILLIS: usize = 200;
+const TARGET_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * CHUNK_MILLIS / 1000;
 const SILENCE_THRESHOLD: f32 = 0.01;
+const RESAMPLE_CHUNK_FRAMES: usize = 1024;
+
+pub struct ResampleState {
+    input_rate: u32,
+    resampler: Async<f32>,
+    input_buffer: Vec<f32>,
+}
+
+impl ResampleState {
+    pub fn new(input_rate: u32) -> Self {
+        Self {
+            input_rate,
+            resampler: build_resampler(input_rate, RESAMPLE_CHUNK_FRAMES),
+            input_buffer: Vec::new(),
+        }
+    }
+}
 
 pub struct CaptureStream {
     #[cfg(target_os = "linux")]
@@ -68,6 +86,8 @@ pub fn is_silence(samples: &[f32], threshold: f32) -> bool {
 fn process_input_data(
     data: &[f32],
     channels: usize,
+    input_rate: u32,
+    resample_state: &mut ResampleState,
     buffer: &mut Vec<f32>,
     tx: &mpsc::Sender<Vec<f32>>,
 ) {
@@ -79,21 +99,59 @@ fn process_input_data(
         data.to_vec()
     };
 
-    let resampled_data = mono_data;
+    let resampled_data = if input_rate == TARGET_SAMPLE_RATE {
+        mono_data
+    } else {
+        resample_state.input_buffer.extend_from_slice(&mono_data);
+        let mut output = Vec::new();
+
+        loop {
+            let needed = resample_state.resampler.input_frames_next();
+            if resample_state.input_buffer.len() < needed {
+                break;
+            }
+
+            let input_slice = &resample_state.input_buffer[..needed];
+            let input_adapter = match InterleavedSlice::new(input_slice, 1, needed) {
+                Ok(adapter) => adapter,
+                Err(err) => {
+                    eprintln!("Erro ao criar adapter de entrada: {err:?}");
+                    break;
+                }
+            };
+
+            let resampled = match resample_state.resampler.process(&input_adapter, 0, None) {
+                Ok(buffer) => buffer,
+                Err(err) => {
+                    eprintln!("Erro ao resamplear audio: {err:?}");
+                    break;
+                }
+            };
+
+            output.extend_from_slice(&resampled.take_data());
+            resample_state.input_buffer.drain(..needed);
+        }
+
+        output
+    };
 
     buffer.extend_from_slice(&resampled_data);
 
     if buffer.len() >= TARGET_SAMPLES {
         if !is_silence(buffer, SILENCE_THRESHOLD) {
-            let _ = tx.send(buffer.clone());
+            let chunk = std::mem::take(buffer);
+            let _ = tx.send(chunk);
+        } else {
+            buffer.clear();
         }
-        buffer.clear();
     }
 }
 
 #[cfg(target_os = "linux")]
 mod pulse_backend {
-    use super::{process_input_data, CaptureStream, TARGET_SAMPLES, TARGET_SAMPLE_RATE};
+    use super::{
+        process_input_data, CaptureStream, ResampleState, TARGET_SAMPLES, TARGET_SAMPLE_RATE,
+    };
     use libpulse_binding::callbacks::ListResult;
     use libpulse_binding::context::{Context, FlagSet as ContextFlagSet};
     use libpulse_binding::mainloop::standard::Mainloop;
@@ -360,6 +418,7 @@ mod pulse_backend {
         let join_handle = thread::spawn(move || {
             let mut buffer: Vec<u8> = vec![0; 2048];
             let mut float_buffer: Vec<f32> = Vec::with_capacity(TARGET_SAMPLES);
+            let mut resample_state = ResampleState::new(TARGET_SAMPLE_RATE);
             while running_clone.load(Ordering::SeqCst) {
                 if let Err(err) = simple.read(&mut buffer) {
                     eprintln!("Erro ao ler stream PulseAudio: {err}");
@@ -371,7 +430,14 @@ mod pulse_backend {
                     let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
                     converted.push(sample as f32 / i16::MAX as f32);
                 }
-                process_input_data(&converted, 1, &mut float_buffer, &tx);
+                process_input_data(
+                    &converted,
+                    1,
+                    TARGET_SAMPLE_RATE,
+                    &mut resample_state,
+                    &mut float_buffer,
+                    &tx,
+                );
             }
         });
 
@@ -430,6 +496,7 @@ pub fn start_capture(tx: mpsc::Sender<Vec<f32>>) -> Result<CaptureStream, String
     let sample_format = supported_config.sample_format();
     let config: cpal::StreamConfig = supported_config.into();
     let channels = config.channels as usize;
+    let input_rate = config.sample_rate.0;
 
     let err_fn = |err| eprintln!("Erro no stream de audio: {}", err);
 
@@ -437,11 +504,19 @@ pub fn start_capture(tx: mpsc::Sender<Vec<f32>>) -> Result<CaptureStream, String
         SampleFormat::F32 => {
             let tx = tx.clone();
             let mut buffer: Vec<f32> = Vec::with_capacity(TARGET_SAMPLES);
+            let mut resample_state = ResampleState::new(input_rate);
             device
                 .build_input_stream(
                     &config,
                     move |data: &[f32], _| {
-                        process_input_data(data, channels, &mut buffer, &tx);
+                        process_input_data(
+                            data,
+                            channels,
+                            input_rate,
+                            &mut resample_state,
+                            &mut buffer,
+                            &tx,
+                        );
                     },
                     err_fn,
                     None,
@@ -451,6 +526,7 @@ pub fn start_capture(tx: mpsc::Sender<Vec<f32>>) -> Result<CaptureStream, String
         SampleFormat::I16 => {
             let tx = tx.clone();
             let mut buffer: Vec<f32> = Vec::with_capacity(TARGET_SAMPLES);
+            let mut resample_state = ResampleState::new(input_rate);
             device
                 .build_input_stream(
                     &config,
@@ -459,7 +535,14 @@ pub fn start_capture(tx: mpsc::Sender<Vec<f32>>) -> Result<CaptureStream, String
                             .iter()
                             .map(|&sample| sample as f32 / i16::MAX as f32)
                             .collect();
-                        process_input_data(&converted, channels, &mut buffer, &tx);
+                        process_input_data(
+                            &converted,
+                            channels,
+                            input_rate,
+                            &mut resample_state,
+                            &mut buffer,
+                            &tx,
+                        );
                     },
                     err_fn,
                     None,
@@ -468,6 +551,7 @@ pub fn start_capture(tx: mpsc::Sender<Vec<f32>>) -> Result<CaptureStream, String
         }
         SampleFormat::U16 => {
             let mut buffer: Vec<f32> = Vec::with_capacity(TARGET_SAMPLES);
+            let mut resample_state = ResampleState::new(input_rate);
             device
                 .build_input_stream(
                     &config,
@@ -476,7 +560,14 @@ pub fn start_capture(tx: mpsc::Sender<Vec<f32>>) -> Result<CaptureStream, String
                             .iter()
                             .map(|&sample| (sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
                             .collect();
-                        process_input_data(&converted, channels, &mut buffer, &tx);
+                        process_input_data(
+                            &converted,
+                            channels,
+                            input_rate,
+                            &mut resample_state,
+                            &mut buffer,
+                            &tx,
+                        );
                     },
                     err_fn,
                     None,

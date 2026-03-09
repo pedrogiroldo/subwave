@@ -4007,6 +4007,7 @@ name = "subwave"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audioadapter-buffers",
  "cpal",
  "libc",
  "libpulse-binding",

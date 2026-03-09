@@ -34,8 +34,17 @@ fn enqueue_transcription_chunk(state: &AppState, audio_chunk: Vec<f32>) {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
-    if queue.len() >= MAX_TRANSCRIPTION_QUEUE {
-        queue.pop_front();
+    while queue.len() >= MAX_TRANSCRIPTION_QUEUE
+        && state.transcription_running.load(Ordering::SeqCst)
+    {
+        queue = match state.transcription_condvar.wait(queue) {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+    }
+
+    if !state.transcription_running.load(Ordering::SeqCst) {
+        return;
     }
 
     queue.push_back(audio_chunk);
@@ -131,6 +140,7 @@ fn start_capture(window: tauri::Window, state: State<'_, AppState>) -> Result<St
 
                 let audio_chunk = queue.pop_front();
                 drop(queue);
+                state.transcription_condvar.notify_one();
 
                 let Some(audio_chunk) = audio_chunk else {
                     continue;
@@ -201,7 +211,7 @@ fn start_capture(window: tauri::Window, state: State<'_, AppState>) -> Result<St
 }
 
 #[tauri::command]
-fn stop_capture(state: State<'_, AppState>) -> Result<String, String> {
+fn stop_capture(window: tauri::Window, state: State<'_, AppState>) -> Result<String, String> {
     let mut is_capturing = state.is_capturing.lock().map_err(|e| e.to_string())?;
     let mut audio_stream = state.audio_stream.lock().map_err(|e| e.to_string())?;
 
@@ -221,6 +231,23 @@ fn stop_capture(state: State<'_, AppState>) -> Result<String, String> {
     }
     if let Ok(mut worker_started) = state.transcription_worker_started.lock() {
         *worker_started = false;
+    }
+
+    let final_text = {
+        let mut vosk_stream = state.vosk_stream.lock().map_err(|e| e.to_string())?;
+        if let Some(stream) = vosk_stream.as_mut() {
+            stream.finalize().ok()
+        } else {
+            None
+        }
+    };
+
+    if let Some(text) = final_text {
+        if !text.trim().is_empty() {
+            if let Err(err) = window.emit("transcription", text) {
+                eprintln!("Failed to emit final transcription: {err}");
+            }
+        }
     }
 
     Ok("Audio capture stopped".to_string())
