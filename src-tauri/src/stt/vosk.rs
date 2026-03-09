@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
+use std::ffi::CString;
 use vosk::{CompleteResult, DecodingState, Model, Recognizer};
 
-const PORTUGUESE_MODEL_PATH: &str = "models/vosk-model-small-pt-0.3";
+const PORTUGUESE_MODEL_PATH: &str = "models/vosk-model-pt";
 const TARGET_SAMPLE_RATE: f32 = 16000.0;
 
 fn load_model() -> Result<Model> {
@@ -26,6 +27,12 @@ pub struct VoskStream {
 
 impl VoskStream {
     pub fn new() -> Result<Self> {
+        // Force C numeric locale so Vosk JSON uses dot decimals.
+        unsafe {
+            let c_locale = CString::new("C").unwrap();
+            libc::setlocale(libc::LC_NUMERIC, c_locale.as_ptr());
+        }
+
         let model = load_model()?;
         let mut recognizer = Recognizer::new(&model, TARGET_SAMPLE_RATE)
             .ok_or_else(|| anyhow!("Failed to create Vosk recognizer"))?;

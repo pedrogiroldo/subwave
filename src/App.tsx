@@ -17,7 +17,7 @@ function App() {
     const unlisten = listen<string>("transcription", (event) => {
       const text = event.payload;
       if (text.trim()) {
-        setTranscription((prev) => prev + " " + text);
+        setTranscription(() => text);
       }
     });
 
@@ -77,10 +77,18 @@ function App() {
 
       <section className="card">
         <div className="row">
-          <button className="start" onClick={startCapture} disabled={!modelLoaded || isCapturing}>
+          <button
+            className="start"
+            onClick={startCapture}
+            disabled={!modelLoaded || isCapturing}
+          >
             {isCapturing ? "Gravando..." : "Iniciar gravacao"}
           </button>
-          <button className="stop" onClick={stopCapture} disabled={!modelLoaded || !isCapturing}>
+          <button
+            className="stop"
+            onClick={stopCapture}
+            disabled={!modelLoaded || !isCapturing}
+          >
             Parar gravacao
           </button>
         </div>
