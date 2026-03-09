@@ -27,3 +27,9 @@ rubato = "1.0.1"
 whisper-rs = "0.15.1"
 reqwest = "0.13.2"
 tokio = "1.50.0"
+anyhow = "1.0.102"
+vosk = "0.3.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = "2.28.1"
+libpulse-simple-binding = "2.28.1"
