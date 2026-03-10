@@ -6,6 +6,7 @@ use tauri::{Emitter, Manager, State};
 
 mod audio;
 mod stt;
+pub mod translate;
 
 use audio::capture;
 use stt::vosk;
@@ -18,6 +19,7 @@ struct AppState {
     transcription_condvar: Condvar,
     transcription_worker_started: Mutex<bool>,
     transcription_running: AtomicBool,
+    translate_service: Mutex<Option<translate::TranslateService>>,
 }
 
 const MAX_TRANSCRIPTION_QUEUE: usize = 20;
@@ -259,6 +261,39 @@ fn is_capturing(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(*is_capturing)
 }
 
+#[tauri::command]
+fn init_translate_model(state: State<'_, AppState>) -> Result<String, String> {
+    let mut service = state
+        .translate_service
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if service.is_some() {
+        return Ok("Translate model already loaded".to_string());
+    }
+    let instance = translate::TranslateService::init_default().map_err(|e| e.to_string())?;
+    *service = Some(instance);
+    Ok("Translate model loaded".to_string())
+}
+
+#[tauri::command]
+fn translate_text(
+    text: String,
+    src_lang: String,
+    tgt_lang: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let service = state
+        .translate_service
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let Some(service) = service.as_ref() else {
+        return Err("Translate model not loaded".to_string());
+    };
+    service
+        .translate(&text, &src_lang, &tgt_lang)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -271,6 +306,7 @@ pub fn run() {
             transcription_condvar: Condvar::new(),
             transcription_worker_started: Mutex::new(false),
             transcription_running: AtomicBool::new(false),
+            translate_service: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_audio_devices,
@@ -280,6 +316,8 @@ pub fn run() {
             start_capture,
             stop_capture,
             is_capturing,
+            init_translate_model,
+            translate_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
