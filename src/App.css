@@ -48,6 +48,29 @@ h2 {
   justify-content: center;
 }
 
+.select-row {
+  justify-content: space-between;
+}
+
+.select-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 180px;
+  flex: 1;
+  text-align: left;
+  font-size: 0.9rem;
+  color: #666;
+}
+
+select {
+  padding: 0.7rem 0.9rem;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 1rem;
+  background: white;
+}
+
 input {
   flex: 1;
   min-width: 200px;
@@ -165,6 +188,12 @@ button.stop:hover:not(:disabled) {
   }
 
   input {
+    background-color: #4a4a4a;
+    border-color: #555;
+    color: #fff;
+  }
+
+  select {
     background-color: #4a4a4a;
     border-color: #555;
     color: #fff;
